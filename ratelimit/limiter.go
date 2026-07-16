@@ -24,3 +24,9 @@ type Result struct {
 type RateLimiter interface {
 	Allow(ctx context.Context, clientID string, routeID string) (Result, error)
 }
+
+// ScalableRateLimiter extends RateLimiter to allow dynamically resizing the capacity limit.
+type ScalableRateLimiter interface {
+	RateLimiter
+	SetScale(factor float64)
+}

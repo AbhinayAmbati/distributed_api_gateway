@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/AbhinayAmbati/distributed_cache_system/client"
@@ -21,8 +22,10 @@ type SlidingCounterState struct {
 }
 
 type SlidingCounter struct {
+	mu          sync.RWMutex
 	cacheClient *client.Client
 	clock       *ClockSync
+	baseLimit   int64
 	limit       int64
 	window      time.Duration
 	gatewayID   string
@@ -33,6 +36,7 @@ func NewSlidingCounter(cc *client.Client, cs *ClockSync, limit int64, window tim
 	return &SlidingCounter{
 		cacheClient: cc,
 		clock:       cs,
+		baseLimit:   limit,
 		limit:       limit,
 		window:      window,
 		gatewayID:   gatewayID,
@@ -40,11 +44,21 @@ func NewSlidingCounter(cc *client.Client, cs *ClockSync, limit int64, window tim
 	}
 }
 
+func (sc *SlidingCounter) SetScale(factor float64) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.limit = int64(math.Max(1, float64(sc.baseLimit)*factor))
+}
+
 func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID string) (Result, error) {
 	key := fmt.Sprintf("rl:sc:%s:%s", clientID, routeID)
 	now := sc.clock.Now().UnixMilli()
 	windowMS := sc.window.Milliseconds()
 	currentWindowID := now / windowMS
+
+	sc.mu.RLock()
+	limit := sc.limit
+	sc.mu.RUnlock()
 
 	maxRetries := 3
 
@@ -54,7 +68,7 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 		data, found, err := sc.cacheClient.Get(ctx, key)
 		if err != nil {
 			if sc.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: sc.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -111,11 +125,11 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 		estimatedCount := prevCountContribution + float64(state.CurrCount)
 
 		// 3. Evaluate limit
-		allowed := int64(math.Floor(estimatedCount)) < sc.limit
+		allowed := int64(math.Floor(estimatedCount)) < limit
 		var remaining int64
 		if allowed {
 			state.CurrCount++
-			remaining = sc.limit - int64(math.Floor(estimatedCount)) - 1
+			remaining = limit - int64(math.Floor(estimatedCount)) - 1
 			if remaining < 0 {
 				remaining = 0
 			}
@@ -130,7 +144,7 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 			return Result{
 				Allowed:   false,
 				Remaining: remaining,
-				Limit:     sc.limit,
+				Limit:     limit,
 				ResetIn:   resetIn,
 			}, nil
 		}
@@ -148,7 +162,7 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 		err = sc.cacheClient.Set(ctx, key, updatedData, sc.window*2)
 		if err != nil {
 			if sc.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: sc.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -162,7 +176,7 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 					return Result{
 						Allowed:   true,
 						Remaining: remaining,
-						Limit:     sc.limit,
+						Limit:     limit,
 						ResetIn:   resetIn,
 					}, nil
 				}
@@ -174,7 +188,7 @@ func (sc *SlidingCounter) Allow(ctx context.Context, clientID string, routeID st
 	}
 
 	if sc.failureMode == "fail_open" {
-		return Result{Allowed: true, Remaining: 0, Limit: sc.limit, ResetIn: 0}, nil
+		return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 	}
 	return Result{}, ErrRateLimitExceeded
 }

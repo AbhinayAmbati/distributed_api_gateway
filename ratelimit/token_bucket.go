@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/AbhinayAmbati/distributed_cache_system/client"
@@ -19,10 +20,13 @@ type TokenBucketState struct {
 }
 
 type TokenBucket struct {
+	mu          sync.RWMutex
 	cacheClient *client.Client
 	clock       *ClockSync
+	baseLimit   int64
 	limit       int64
 	window      time.Duration
+	baseBurst   int64
 	burst       int64
 	gatewayID   string
 	failureMode string
@@ -35,19 +39,32 @@ func NewTokenBucket(cc *client.Client, cs *ClockSync, limit int64, window time.D
 	return &TokenBucket{
 		cacheClient: cc,
 		clock:       cs,
+		baseLimit:   limit,
 		limit:       limit,
 		window:      window,
+		baseBurst:   burst,
 		burst:       burst,
 		gatewayID:   gatewayID,
 		failureMode: failureMode,
 	}
 }
 
+func (tb *TokenBucket) SetScale(factor float64) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.limit = int64(math.Max(1, float64(tb.baseLimit)*factor))
+	tb.burst = int64(math.Max(1, float64(tb.baseBurst)*factor))
+}
+
 func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID string) (Result, error) {
 	key := fmt.Sprintf("rl:tb:%s:%s", clientID, routeID)
 	now := tb.clock.Now().UnixMilli()
 
-	refillRate := float64(tb.limit) / float64(tb.window.Milliseconds())
+	tb.mu.RLock()
+	limit := tb.limit
+	burst := tb.burst
+	refillRate := float64(limit) / float64(tb.window.Milliseconds())
+	tb.mu.RUnlock()
 	maxRetries := 3
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -56,7 +73,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 		data, found, err := tb.cacheClient.Get(ctx, key)
 		if err != nil {
 			if tb.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: tb.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -64,7 +81,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 		if !found {
 			// Initialize new state
 			state = TokenBucketState{
-				Tokens:     float64(tb.burst),
+				Tokens:     float64(burst),
 				LastRefill: now,
 				Version:    1,
 				LastWriter: tb.gatewayID,
@@ -73,7 +90,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 			if err := json.Unmarshal(data, &state); err != nil {
 				// Corrupt data, reset
 				state = TokenBucketState{
-					Tokens:     float64(tb.burst),
+					Tokens:     float64(burst),
 					LastRefill: now,
 					Version:    1,
 					LastWriter: tb.gatewayID,
@@ -88,7 +105,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 		}
 
 		refill := float64(elapsed) * refillRate
-		newTokens := math.Min(float64(tb.burst), state.Tokens+refill)
+		newTokens := math.Min(float64(burst), state.Tokens+refill)
 
 		// 3. Evaluate limit
 		var allowed bool
@@ -103,7 +120,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 		}
 
 		// Calculate reset duration
-		neededTokens := float64(tb.burst) - newTokens
+		neededTokens := float64(burst) - newTokens
 		var resetIn time.Duration
 		if refillRate > 0 {
 			resetIn = time.Duration(neededTokens/refillRate) * time.Millisecond
@@ -114,7 +131,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 			return Result{
 				Allowed:   false,
 				Remaining: remaining,
-				Limit:     tb.limit,
+				Limit:     limit,
 				ResetIn:   resetIn,
 			}, nil
 		}
@@ -135,7 +152,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 		err = tb.cacheClient.Set(ctx, key, updatedData, ttl)
 		if err != nil {
 			if tb.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: tb.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -150,7 +167,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 					return Result{
 						Allowed:   true,
 						Remaining: remaining,
-						Limit:     tb.limit,
+						Limit:     limit,
 						ResetIn:   resetIn,
 					}, nil
 				}
@@ -163,7 +180,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, clientID string, routeID strin
 
 	// If we exhausted retries, fallback: let request pass or fail based on failure policy
 	if tb.failureMode == "fail_open" {
-		return Result{Allowed: true, Remaining: 0, Limit: tb.limit, ResetIn: 0}, nil
+		return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 	}
 	return Result{}, ErrRateLimitExceeded
 }

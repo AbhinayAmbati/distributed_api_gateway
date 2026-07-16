@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/AbhinayAmbati/distributed_cache_system/client"
@@ -26,8 +27,10 @@ type CountMinSketchState struct {
 }
 
 type CountMinSketch struct {
+	mu          sync.RWMutex
 	cacheClient *client.Client
 	clock       *ClockSync
+	baseLimit   int64
 	limit       int64
 	window      time.Duration
 	gatewayID   string
@@ -38,11 +41,18 @@ func NewCountMinSketch(cc *client.Client, cs *ClockSync, limit int64, window tim
 	return &CountMinSketch{
 		cacheClient: cc,
 		clock:       cs,
+		baseLimit:   limit,
 		limit:       limit,
 		window:      window,
 		gatewayID:   gatewayID,
 		failureMode: failureMode,
 	}
+}
+
+func (cms *CountMinSketch) SetScale(factor float64) {
+	cms.mu.Lock()
+	defer cms.mu.Unlock()
+	cms.limit = int64(math.Max(1, float64(cms.baseLimit)*factor))
 }
 
 // getHashIndices returns the column index for each of the Depth rows.
@@ -61,6 +71,10 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 	windowMS := cms.window.Milliseconds()
 	currentWindowID := now / windowMS
 
+	cms.mu.RLock()
+	limit := cms.limit
+	cms.mu.RUnlock()
+
 	// The CMS is global for the route, tracking all clients in a single probabilistic grid
 	key := fmt.Sprintf("rl:cms:%s", routeID)
 	indices := cms.getHashIndices(clientID)
@@ -72,7 +86,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 		data, found, err := cms.cacheClient.Get(ctx, key)
 		if err != nil {
 			if cms.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: cms.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -97,7 +111,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 		}
 
 		// 2. Evaluate rate limit
-		allowed := int64(est) < cms.limit
+		allowed := int64(est) < limit
 		var remaining int64
 		if allowed {
 			// Increment counters at the hash locations
@@ -105,7 +119,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 				col := indices[row]
 				state.Grid[row][col]++
 			}
-			remaining = cms.limit - int64(est) - 1
+			remaining = limit - int64(est) - 1
 			if remaining < 0 {
 				remaining = 0
 			}
@@ -121,7 +135,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 			return Result{
 				Allowed:   false,
 				Remaining: remaining,
-				Limit:     cms.limit,
+				Limit:     limit,
 				ResetIn:   resetIn,
 			}, nil
 		}
@@ -139,7 +153,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 		err = cms.cacheClient.Set(ctx, key, updatedData, cms.window*2)
 		if err != nil {
 			if cms.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: cms.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -153,7 +167,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 					return Result{
 						Allowed:   true,
 						Remaining: remaining,
-						Limit:     cms.limit,
+						Limit:     limit,
 						ResetIn:   resetIn,
 					}, nil
 				}
@@ -165,7 +179,7 @@ func (cms *CountMinSketch) Allow(ctx context.Context, clientID string, routeID s
 	}
 
 	if cms.failureMode == "fail_open" {
-		return Result{Allowed: true, Remaining: 0, Limit: cms.limit, ResetIn: 0}, nil
+		return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 	}
 	return Result{}, ErrRateLimitExceeded
 }

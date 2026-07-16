@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/AbhinayAmbati/distributed_cache_system/client"
@@ -17,8 +19,10 @@ type SlidingLogState struct {
 }
 
 type SlidingLog struct {
+	mu          sync.RWMutex
 	cacheClient *client.Client
 	clock       *ClockSync
+	baseLimit   int64
 	limit       int64
 	window      time.Duration
 	gatewayID   string
@@ -29,6 +33,7 @@ func NewSlidingLog(cc *client.Client, cs *ClockSync, limit int64, window time.Du
 	return &SlidingLog{
 		cacheClient: cc,
 		clock:       cs,
+		baseLimit:   limit,
 		limit:       limit,
 		window:      window,
 		gatewayID:   gatewayID,
@@ -36,11 +41,21 @@ func NewSlidingLog(cc *client.Client, cs *ClockSync, limit int64, window time.Du
 	}
 }
 
+func (sl *SlidingLog) SetScale(factor float64) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sl.limit = int64(math.Max(1, float64(sl.baseLimit)*factor))
+}
+
 func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string) (Result, error) {
 	key := fmt.Sprintf("rl:sl:%s:%s", clientID, routeID)
 	now := sl.clock.Now().UnixMilli()
 	windowMS := sl.window.Milliseconds()
 	threshold := now - windowMS
+
+	sl.mu.RLock()
+	limit := sl.limit
+	sl.mu.RUnlock()
 
 	maxRetries := 3
 
@@ -50,7 +65,7 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 		data, found, err := sl.cacheClient.Get(ctx, key)
 		if err != nil {
 			if sl.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: sl.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -80,13 +95,13 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 		}
 
 		// 3. Determine if request is allowed
-		allowed := int64(len(filtered)) < sl.limit
+		allowed := int64(len(filtered)) < limit
 		var remaining int64
 		var resetIn time.Duration
 
 		if allowed {
 			filtered = append(filtered, now)
-			remaining = sl.limit - int64(len(filtered))
+			remaining = limit - int64(len(filtered))
 			if remaining < 0 {
 				remaining = 0
 			}
@@ -106,7 +121,7 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 			return Result{
 				Allowed:   false,
 				Remaining: remaining,
-				Limit:     sl.limit,
+				Limit:     limit,
 				ResetIn:   resetIn,
 			}, nil
 		}
@@ -125,7 +140,7 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 		err = sl.cacheClient.Set(ctx, key, updatedData, sl.window)
 		if err != nil {
 			if sl.failureMode == "fail_open" {
-				return Result{Allowed: true, Remaining: 0, Limit: sl.limit, ResetIn: 0}, nil
+				return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 			}
 			return Result{}, fmt.Errorf("%w: %v", ErrCacheUnavailable, err)
 		}
@@ -139,7 +154,7 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 					return Result{
 						Allowed:   true,
 						Remaining: remaining,
-						Limit:     sl.limit,
+						Limit:     limit,
 						ResetIn:   resetIn,
 					}, nil
 				}
@@ -151,7 +166,7 @@ func (sl *SlidingLog) Allow(ctx context.Context, clientID string, routeID string
 	}
 
 	if sl.failureMode == "fail_open" {
-		return Result{Allowed: true, Remaining: 0, Limit: sl.limit, ResetIn: 0}, nil
+		return Result{Allowed: true, Remaining: 0, Limit: limit, ResetIn: 0}, nil
 	}
 	return Result{}, ErrRateLimitExceeded
 }
