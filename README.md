@@ -76,7 +76,7 @@ The Token Bucket algorithm is ideal for handling traffic bursts. Tokens are refi
 
 #### How It Works
 - **Refill Calculation**: On each request, the elapsed time since `last_refill` is computed using the synchronized clock. Tokens are refilled proportionally:
-  $$\text{refill} = \text{elapsed\_ms} \times \frac{\text{limit}}{\text{window\_ms}}$$
+  $$\text{refill} = \text{elapsed} \times \frac{\text{limit}}{\text{window}}$$
   $$\text{tokens} = \min(\text{burst}, \text{tokens} + \text{refill})$$
 - **Consumption**: If `tokens >= 1.0`, the request is allowed and one token is consumed. Otherwise, the request is denied.
 - **Burst Handling**: The `burst` parameter caps the maximum tokens, allowing a burst of requests up to that value even if the steady-state rate is lower.
@@ -124,8 +124,8 @@ A hybrid approach that offers a good balance between accuracy and memory efficie
 - **Window Identification**: Time is divided into fixed-duration epochs. The window ID is `now / window_size_ms`.
 - **Window Rolling**: When the current request falls in a new window, the current count becomes the previous count, and the current count resets to zero. If more than one window has elapsed, both counts reset.
 - **Weighted Estimation**: The estimated request count combines the previous and current windows:
-  $$\text{weight} = 1 - \frac{\text{elapsed\_in\_current\_window}}{\text{window\_size}}$$
-  $$\text{estimated} = \text{prev\_count} \times \text{weight} + \text{curr\_count}$$
+  $$\text{weight} = 1 - \frac{\text{elapsed}}{\text{window}}$$
+  $$\text{estimated} = \text{prevCount} \times \text{weight} + \text{currCount}$$
 - **Cache Key**: `rl:sc:{clientID}:{routeID}`
 
 ### 4. Count-Min Sketch (Probabilistic)
