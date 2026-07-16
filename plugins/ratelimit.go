@@ -68,10 +68,11 @@ func (p *RateLimitPlugin) Handle(ctx *gateway.Context, next http.HandlerFunc) {
 	ctx.Writer.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
 	ctx.Writer.Header().Set("X-RateLimit-Reset", strconv.FormatInt(int64(res.ResetIn.Seconds()), 10))
 
-	if !res.Allowed {
+	if !res.Allowed || res.IsShadow {
 		// Check if it's a Shadow Rate Limit (observability only)
 		if rc.RateLimit.ShadowOnly || res.IsShadow {
 			ctx.Writer.Header().Set("X-Shadow-Rate-Limited", "true")
+			ctx.Request.Header.Set("X-Shadow-Rate-Limited", "true")
 			next(ctx.Writer, ctx.Request)
 			return
 		}
