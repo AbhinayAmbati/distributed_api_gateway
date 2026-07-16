@@ -107,3 +107,13 @@ func (cbrl *CircuitBreakingRateLimiter) Allow(ctx context.Context, clientID stri
 	cbrl.cb.RecordSuccess()
 	return res, nil
 }
+
+func (cbrl *CircuitBreakingRateLimiter) SetScale(factor float64) {
+	if scalable, ok := cbrl.limiter.(ScalableRateLimiter); ok {
+		scalable.SetScale(factor)
+	}
+}
+
+func (cbrl *CircuitBreakingRateLimiter) Unwrap() RateLimiter {
+	return cbrl.limiter
+}

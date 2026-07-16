@@ -65,7 +65,23 @@ func NewServer(cfg *config.Config, gatewayID string) (*Server, error) {
 		default:
 			rl = ratelimit.NewTokenBucket(cc, cs, rc.RateLimit.Limit, rc.RateLimit.ParsedWindow, rc.RateLimit.Burst, gatewayID, rc.RateLimit.FailureMode)
 		}
-		limiters[rc.Path] = rl
+
+		// Wrap with Circuit Breaker (failure policy)
+		cb := ratelimit.NewCircuitBreakingRateLimiter(rl, 3, 5*time.Second, rc.RateLimit.FailureMode)
+		var finalRL ratelimit.RateLimiter = cb
+
+		// Wrap with Adaptive Rate Limiter if enabled
+		if rc.Adaptive.Enabled {
+			engine := ratelimit.NewAdaptiveEngine(rc.Adaptive.TargetLatencyMS, rc.Adaptive.ErrorRateThreshold)
+			finalRL = ratelimit.NewAdaptiveRateLimiter(cb, engine)
+		}
+
+		// Wrap with Shadow Rate Limiter if shadow rate limiting is configured
+		if rc.RateLimit.ShadowOnly {
+			finalRL = ratelimit.NewShadowRateLimiter(finalRL)
+		}
+
+		limiters[rc.Path] = finalRL
 	}
 
 	s := &Server{
@@ -116,7 +132,7 @@ func (s *Server) GetProxy(rc *config.RouteConfig) (*httputil.ReverseProxy, error
 
 	// Performance Optimization: Sync.Pool byte buffer size set to 32KB
 	proxy, err := NewProxy(rc.BackendURL, 32*1024, func(duration time.Duration, statusCode int, err error) {
-		// Callback for monitoring backend latency and error rates (Phase 4: Adaptive Rate Limiting)
+		// Callback for monitoring backend latency and error rates
 		s.recordBackendMetrics(rc.Path, duration, statusCode, err)
 	})
 	if err != nil {
@@ -160,7 +176,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// recordBackendMetrics receives callbacks from the proxy transport.
+// GetLimiters returns the map of route rate limiters.
+func (s *Server) GetLimiters() map[string]ratelimit.RateLimiter {
+	return s.limiters
+}
+
+// recordBackendMetrics updates the corresponding AdaptiveEngine with request duration and status.
 func (s *Server) recordBackendMetrics(routePath string, duration time.Duration, statusCode int, err error) {
-	// Will be implemented in Phase 4: Adaptive Rate Limiting
+	limiter, exists := s.limiters[routePath]
+	if !exists {
+		return
+	}
+
+	curr := limiter
+	for curr != nil {
+		if adaptive, ok := curr.(*ratelimit.AdaptiveRateLimiter); ok {
+			adaptive.RecordRequest(duration, statusCode, err)
+			return
+		}
+
+		if unwrappable, ok := curr.(interface{ Unwrap() ratelimit.RateLimiter }); ok {
+			curr = unwrappable.Unwrap()
+		} else {
+			break
+		}
+	}
 }

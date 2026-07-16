@@ -33,3 +33,7 @@ func (srl *ShadowRateLimiter) SetScale(factor float64) {
 		scalable.SetScale(factor)
 	}
 }
+
+func (srl *ShadowRateLimiter) Unwrap() RateLimiter {
+	return srl.limiter
+}

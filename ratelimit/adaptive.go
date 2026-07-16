@@ -107,3 +107,11 @@ func (arl *AdaptiveRateLimiter) Allow(ctx context.Context, clientID string, rout
 func (arl *AdaptiveRateLimiter) SetScale(factor float64) {
 	arl.limiter.SetScale(factor)
 }
+
+func (arl *AdaptiveRateLimiter) Unwrap() RateLimiter {
+	return arl.limiter
+}
+
+func (arl *AdaptiveRateLimiter) RecordRequest(duration time.Duration, statusCode int, err error) {
+	arl.engine.RecordRequest(duration, statusCode, err)
+}
