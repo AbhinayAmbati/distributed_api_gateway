@@ -1,0 +1,64 @@
+server:
+  addr: ":8080"
+  log_level: "info"
+
+cache:
+  nodes:
+    node-1: "localhost:7001"
+    node-2: "localhost:7002"
+    node-3: "localhost:7003"
+  dial_timeout: "5s"
+  request_timeout: "3s"
+
+routes:
+  - path: "/api/v1/users"
+    method: "GET"
+    backend_url: "http://localhost:8081"
+    rate_limit:
+      algorithm: "token_bucket"
+      limit: 10
+      window: "1s"
+      burst: 15
+      failure_mode: "fail_open"
+    adaptive:
+      enabled: true
+      target_latency_ms: 100
+      error_rate_threshold: 0.05
+    wasm_plugin: ""
+
+  - path: "/api/v1/payments"
+    method: "POST"
+    backend_url: "http://localhost:8081"
+    rate_limit:
+      algorithm: "sliding_counter"
+      limit: 5
+      window: "1m"
+      failure_mode: "fail_closed"
+    adaptive:
+      enabled: false
+    wasm_plugin: ""
+
+  - path: "/api/v1/shadow"
+    method: "GET"
+    backend_url: "http://localhost:8081"
+    rate_limit:
+      algorithm: "count_min_sketch"
+      limit: 20
+      window: "10s"
+      failure_mode: "fail_open"
+      shadow_only: true # shadow rate limiting (observability only)
+    adaptive:
+      enabled: false
+    wasm_plugin: ""
+
+  - path: "/api/v1/custom"
+    method: "*"
+    backend_url: "http://localhost:8081"
+    rate_limit:
+      algorithm: "token_bucket"
+      limit: 100
+      window: "1h"
+      failure_mode: "fail_open"
+    adaptive:
+      enabled: false
+    wasm_plugin: "./wasm_plugins/header_injector.wasm"
