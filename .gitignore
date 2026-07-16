@@ -1,0 +1,7 @@
+# Compiled binaries
+*.exe
+tests.test
+*.test
+
+# Local configurations / logs
+*.log
